@@ -1,0 +1,122 @@
+##############################################################################################
+#  Copyright Accenture. All Rights Reserved.
+#
+#  SPDX-License-Identifier: Apache-2.0
+##############################################################################################
+
+- name: Find the first member peer if not already set
+  set_fact:
+    first_member_peer: "{{ item.name }}"
+    first_member_org: "{{ org_name }}"
+    count: "{{ count | int + 1 }}"
+  loop: "{{ org.services.peers }}"
+  when:
+  - item.type is defined and item.type == "member"
+  - first_member_peer == "" and first_member_org == ""
+  - generate_ipfs_url | bool
+  # - count | int <= 1
+  register: first_member_peer_result
+
+########################################################################################
+# - name: Print the first count
+#   debug:
+#     msg: "{{ count }}"
+#   when:
+#   - generate_ipfs_url | bool
+#   # - count | int == 1
+# - name: Print the first member peer
+#   debug:
+#     msg: "{{ first_member_peer }}"
+#   when:
+#   - generate_ipfs_url | bool
+#   # - count | int == 1
+# - name: Print the first member org
+#   debug:
+#     msg: "{{ first_member_org }}"
+#   when:
+#   - generate_ipfs_url | bool
+#   # - count | int == 1
+# - name: Print the first ipfs_bootnode_name
+#   debug:
+#     msg: "{{ ipfs_bootnode_name }}"
+#   when:
+#   - generate_ipfs_url | bool
+#   # - count | int == 1
+########################################################################################
+
+- name: Fetch bootnode peer id from vault
+  shell: |
+    vault kv get -field=node_id {{ vault.secret_path | default('secretsv2') }}/{{ first_member_org }}/{{ first_member_peer }}/substrate
+  environment:
+    VAULT_ADDR: "{{ vault.url }}"
+    VAULT_TOKEN: "{{ vault.root_token }}"
+  register: node_id
+  when:
+  - generate_ipfs_url | bool
+  - first_member_peer != "" and first_member_org != ""
+
+- name: Collect first Member node data
+  set_fact:
+    node_list: "{{ node_list | default([]) + [ { 'bootnode_id': node_id.stdout, 'external_url': internal_url, 'p2p_port': ipfs_bootnode_port } ] }}"
+  vars:
+    internal_url: "{{ peer.name }}-ipfs-swarm.{{ component_ns }}.svc.cluster.local"
+    ipfs_bootnode_port: "{{ peer.ipfs.swarmPort | int }}"
+  when:
+  - generate_ipfs_url | bool
+  - peer.type == "ipfs-bootnode"
+
+########################################################################################
+# - name: Print the first member peer
+#   debug:
+#     msg: "{{ first_member_peer }}"
+#   when: first_member_peer != ""
+# - name: Print the first member org
+#   debug:
+#     msg: "{{ first_member_org }}"
+#   when: first_member_peer != ""
+- name: Print the first node_list
+  debug:
+    msg: "{{ node_list }}"
+  when:
+  - generate_ipfs_url | bool
+  - peer.type == "ipfs-bootnode"
+  # - count | int == 1
+########################################################################################
+
+# Create a file, if it doesn't exist, to store bootnode information
+- name: Create bootnode file
+  template:
+    src: "ipfsbootnode.tpl"
+    dest: "{{ network.config.member_for_ipfs }}"
+  when:
+  - generate_ipfs_url | bool
+  - peer.type == "ipfs-bootnode"
+  # - count | int == 1
+
+# Generate ipfs node helmrelease file
+- name: "Create ipfs node release file"
+  include_role:
+    name: create/helm_component
+  vars:
+    name: "{{ org_name }}"
+    type: "dscp_ipfs_node"
+    component_name: "{{ peer.name }}-ipfs-node"
+    external_url: "{{ org.external_url_suffix }}"
+    storageclass_name: "{{ org_name }}-bevel-storageclass"
+    git_url: "{{ org.gitops.git_url }}"
+    git_branch: "{{ org.gitops.branch }}"
+    docker_url: "{{ network.docker.url }}"
+  when: 
+  - peer.type == "ipfs-bootnode"
+  - not generate_ipfs_url | bool
+
+# Git Push : Push the above generated files to git directory 
+- name: Git Push
+  include_role: 
+    name: "{{ playbook_dir }}/../../shared/configuration/roles/git_push"
+  vars:
+    GIT_DIR: "{{ playbook_dir }}/../../../"
+    msg: "[ci skip] Pushing ipfs node files"
+  when: 
+  - peer.type == "ipfs-bootnode"
+  - not generate_ipfs_url | bool
